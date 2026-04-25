@@ -1,0 +1,22 @@
+# run.baylen-smoke.yml — minimal end-to-end smoke test for BaylenBunnies.
+# Validates: deck loads, server starts, JVM launches, data generation, dataset
+# stats, training. ~1 generation, tiny game count, single opponent.
+deck: BaylenBunnies
+version: 99
+start_from_version: null
+
+generations: 1
+games_per_gen: 5
+replay_buffer_gens: 1
+
+opponents:
+  - deck: Standard-MonoG
+    mode: minimax
+
+training:
+  analyze_dataset: true
+  generate_plots: true
+  eval_previous_model: false
+
+log_level: ACTIONS
+curriculum: configs/curriculum.yml

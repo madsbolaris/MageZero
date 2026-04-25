@@ -13,6 +13,8 @@ from model import Net, load_model, GLOBAL_MAX, ACTIONS_MAX, PRIORITY_A_MAX, PRIO
 from dataset import H5Indexed, collate_batch,  create_redundancy_ignore_list, filter_opponent_states
 from pyroaring import BitMap
 
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 #add training data under: data/{deck name}/ver{your version num}/training/{your data}.hdf5
 
 
@@ -34,7 +36,7 @@ def train(
     ignore_list = create_redundancy_ignore_list(ds_raw)
 
     # model and data loaders
-    model = Net(GLOBAL_MAX, ACTIONS_MAX).cuda()
+    model = Net(GLOBAL_MAX, ACTIONS_MAX).to(DEVICE)
 
     # optional start point
     if use_checkpoint:
@@ -109,12 +111,12 @@ def train(
 
         for batch_indices, batch_offsets, batch_policy_labels, batch_value_labels, is_players, action_types in dl:
             # Move new input tensors to CUDA
-            batch_indices = batch_indices.cuda()
-            batch_offsets = batch_offsets.cuda()
-            batch_policy_labels = batch_policy_labels.cuda()
-            batch_value_labels = batch_value_labels.cuda()
-            is_players = is_players.cuda().squeeze(-1).to(torch.bool)
-            action_types = action_types.cuda().squeeze(-1).to(torch.long)
+            batch_indices = batch_indices.to(DEVICE)
+            batch_offsets = batch_offsets.to(DEVICE)
+            batch_policy_labels = batch_policy_labels.to(DEVICE)
+            batch_value_labels = batch_value_labels.to(DEVICE)
+            is_players = is_players.to(DEVICE).squeeze(-1).to(torch.bool)
+            action_types = action_types.to(DEVICE).squeeze(-1).to(torch.long)
 
             # Model call uses indices and offsets
             priority_logits, opponent_priority_logits, target_logits, binary_logits ,value_pred = model(batch_indices, batch_offsets)

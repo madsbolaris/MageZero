@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader
 from dataset import H5Indexed, collate_batch, filter_opponent_states
 from model import Net, load_model, GLOBAL_MAX, ACTIONS_MAX, PRIORITY_A_MAX, PRIORITY_B_MAX, TARGETS_MAX, BINARY_MAX, ActionType, lambda_pA, lambda_pB, lambda_t, lambda_b, normalize_policy_labels
 
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 SHOW_CONFUSION_MATRIX = True
 
 mse = nn.MSELoss()
@@ -65,12 +67,12 @@ def validate(model, dl):
     with torch.no_grad():
         for batch_indices, batch_offsets, batch_policy_labels, batch_value_labels, is_players, action_types in dl:
             # Move new input tensors to CUDA
-            batch_indices = batch_indices.cuda()
-            batch_offsets = batch_offsets.cuda()
-            batch_policy_labels = batch_policy_labels.cuda()
-            batch_value_labels = batch_value_labels.cuda()
-            is_players = is_players.cuda().squeeze(-1).to(torch.bool)
-            action_types = action_types.cuda().squeeze(-1).to(torch.long)
+            batch_indices = batch_indices.to(DEVICE)
+            batch_offsets = batch_offsets.to(DEVICE)
+            batch_policy_labels = batch_policy_labels.to(DEVICE)
+            batch_value_labels = batch_value_labels.to(DEVICE)
+            is_players = is_players.to(DEVICE).squeeze(-1).to(torch.bool)
+            action_types = action_types.to(DEVICE).squeeze(-1).to(torch.long)
 
             # Model call uses indices and offsets
             priority_logits, opponent_priority_logits, target_logits, binary_logits, value_pred = model(batch_indices,
@@ -196,7 +198,7 @@ if __name__ == "__main__":
     dl = DataLoader(ds, batch_size=128, shuffle=False, num_workers=0,
                     collate_fn=collate_batch, pin_memory=True, persistent_workers=False)
 
-    model = Net(GLOBAL_MAX, ACTIONS_MAX).cuda()
+    model = Net(GLOBAL_MAX, ACTIONS_MAX).to(DEVICE)
     model.eval()
 
     checkpoint_path = f"models/{args.deck}/ver{args.version}/model.pt.gz"

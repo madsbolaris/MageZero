@@ -1,0 +1,38 @@
+# run.baylen.yml — training run for BaylenBunnies (Selesnya/Mardu Commander, 100-card singleton)
+#
+# Source: xmage/decks/BaylenBunnies.txt  (raw decklist; convert to .dck via XMage deck builder)
+# Commander: Baylen, the Haymaker
+#
+# NOTE: bundled opponents (Standard-Mono*) are 60-card Standard decks — power-level
+# mismatch vs a Commander deck. Fine for an initial bootstrap; swap in Commander
+# opponents later for more meaningful win-rate signal. Starting with `minimax`
+# opponents for the first few generations is fastest.
+
+deck: BaylenBunnies
+version: 1
+start_from_version: null     # null = offline bootstrap from scratch
+
+generations: 6
+games_per_gen: 200
+replay_buffer_gens: 3
+
+opponents:
+  - deck: Standard-MonoR
+    mode: minimax
+  - deck: Standard-MonoG
+    mode: minimax
+  - deck: Standard-MonoB
+    mode: minimax
+  - deck: Standard-MonoW
+    mode: minimax
+  - deck: Standard-MonoU
+    mode: minimax
+
+training:
+  analyze_dataset: true
+  generate_plots: true
+  eval_previous_model: true
+
+log_level: ACTIONS           # ALL | GAMEPLAY | ACTIONS | ERROR
+
+curriculum: configs/curriculum.yml

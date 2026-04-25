@@ -285,10 +285,12 @@ def stop_server(proc: subprocess.Popen) -> None:
 
 def launch_jvm(game_yml_path: str) -> None:
     print(f"[jvm] launching with {game_yml_path}")
-    subprocess.run(
-        ["cmd", "/c", "xmage\\mz-xmage.bat", str(Path(game_yml_path).resolve())],
-        check=True,
-    )
+    yml = str(Path(game_yml_path).resolve())
+    if sys.platform == "win32":
+        cmd = ["cmd", "/c", "xmage\\mz-xmage.bat", yml]
+    else:
+        cmd = ["sh", "xmage/mz-xmage.sh", yml]
+    subprocess.run(cmd, check=True)
 
 
 def run_train(deck: str, version: int, epochs: int, use_checkpoint: bool,
