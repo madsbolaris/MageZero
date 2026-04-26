@@ -17,9 +17,16 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TORCH_THREADS = 1 #max(1, os.cpu_count() // 2)
 torch.set_num_threads(TORCH_THREADS)
 
-# Batching config
-MAX_BATCH = 16
-MAX_WAIT_MS = 0
+# Batching config.
+# MAX_WAIT_MS = 0 disables real coalescing — the worker drains whatever is
+# already in the queue at the instant the first request arrives, which on a
+# fast localhost loop almost always means batch_size=1. A small (~5ms) wait
+# lets concurrent MCTS requests (up to MAX_PENDING per tree on the JVM side)
+# accumulate into one forward pass. Sparse EmbeddingBag at batch=1 is memory-
+# bandwidth bound on CPU, so this is typically a 5-15x throughput win.
+# See madsbolaris/MageZero#1 (P1) and madsbolaris/mage#1 (J1 — must pair).
+MAX_BATCH = 32
+MAX_WAIT_MS = 5
 
 #module state
 server_model = None

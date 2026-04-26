@@ -98,7 +98,12 @@ class Net(nn.Module):
         #emb = self.embedding_norm(emb)
 
 
-        emb = self.embedding_dropout(emb)
+        # Skip the Dropout layer entirely outside training. nn.Dropout in eval
+        # mode is a no-op, but the Module call still costs Python dispatch and
+        # an internal RNG check per forward pass. Avoiding it shaves measurable
+        # latency at batch=1 on CPU. See madsbolaris/MageZero#4 (P4).
+        if self.training:
+            emb = self.embedding_dropout(emb)
         h = self.fc_after_embedding(emb)
         return self.player_priority_head(h), self.opponent_priority_head(h), self.target_head(h), self.binary_head(h), self.value_head(h).squeeze(-1)
 
