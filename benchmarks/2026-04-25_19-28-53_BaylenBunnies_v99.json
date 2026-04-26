@@ -1,0 +1,42 @@
+{
+  "wall_time_sec": 372.74,
+  "games_per_hour": 48.3,
+  "jvm": {
+    "games_completed": 5,
+    "games_successful": 5,
+    "games_failed": 0,
+    "win_rate_pct": 0.0,
+    "total_mcts_evals": 15653,
+    "mcts_sims_per_sec_final": 73.28,
+    "mcts_sims_per_sec_mean": 43.64
+  },
+  "server": {
+    "batch_size_distribution": {
+      "1": 24174,
+      "2": 6262,
+      "3": 429,
+      "4": 21,
+      "5": 5,
+      "6": 1
+    },
+    "batches_per_sec": 82.91,
+    "elapsed_sec": 372.61,
+    "inferences_per_sec": 110.02,
+    "latency_p50_ms": 6.82,
+    "latency_p95_ms": 7.9,
+    "latency_p99_ms": 8.94,
+    "latency_samples": 38100,
+    "requests_per_sec": 102.25,
+    "total_batches": 30892,
+    "total_inferences": 40995,
+    "total_requests": 38100
+  },
+  "config": {
+    "deck": "BaylenBunnies",
+    "version": 99,
+    "opponent": "Standard-MonoG",
+    "opponent_mode": "minimax",
+    "games": 5,
+    "offline": false
+  }
+}

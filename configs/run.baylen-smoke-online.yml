@@ -1,0 +1,24 @@
+# run.baylen-smoke-online.yml — 2-gen smoke test that exercises the NN server.
+# Gen 0 runs offline (no checkpoint). Gen 1 loads gen 0's checkpoint and runs
+# inference through the NN server, validating the full online pipeline:
+#   server batching, JVM RemoteModelEvaluator, wait/notify gates, etc.
+# Expected wall time: ~15-20 min on M1 Mac.
+deck: BaylenBunnies
+version: 99
+start_from_version: null
+
+generations: 2
+games_per_gen: 5
+replay_buffer_gens: 1
+
+opponents:
+  - deck: Standard-MonoG
+    mode: minimax
+
+training:
+  analyze_dataset: true
+  generate_plots: true
+  eval_previous_model: false
+
+log_level: ACTIONS
+curriculum: configs/curriculum.yml

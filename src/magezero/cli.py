@@ -7,6 +7,7 @@ Commands:
   mz play  --deck X [--version N]   host a local AI player (stub)
   mz import <file>                  auto-detects .dck or .mz (.txt stubbed)
   mz export --deck X --version N    pack model into a .mz bundle
+  mz benchmark --run FILE           measure generation throughput
 """
 import argparse
 import json
@@ -123,6 +124,89 @@ def cmd_export(args: argparse.Namespace) -> None:
     print(f"✓ exported → {out_path}")
 
 
+# ─── benchmark ───────────────────────────────────────────────
+
+def cmd_benchmark(args: argparse.Namespace) -> None:
+    run_cfg, cur_cfg = load_all(args.run)
+    print(f"[benchmark] deck={run_cfg.deck} v{run_cfg.version} "
+          f"opponent={run_cfg.opponents[0].deck} games={run_cfg.games_per_gen}")
+    try:
+        report = runner.run_benchmark(run_cfg, cur_cfg, base_game_yml=args.game)
+    except RuntimeError as e:
+        sys.exit(str(e))
+
+    # Pretty-print the report
+    print("\n" + "=" * 60)
+    print("  BENCHMARK REPORT")
+    print("=" * 60)
+    print(f"  Wall time:           {report['wall_time_sec']}s")
+    print(f"  Games/hour:          {report['games_per_hour']}")
+    print(f"  Games completed:     {report['jvm']['games_successful']} "
+          f"(failed: {report['jvm']['games_failed']})")
+    print(f"  Win rate:            {report['jvm']['win_rate_pct']}%")
+    print(f"  MCTS sims/sec (avg): {report['jvm']['mcts_sims_per_sec_mean']}")
+    print(f"  MCTS sims/sec (end): {report['jvm']['mcts_sims_per_sec_final']}")
+    if report.get("server"):
+        srv = report["server"]
+        print(f"  Inferences/sec:      {srv.get('inferences_per_sec', 'N/A')}")
+        print(f"  Batches/sec:         {srv.get('batches_per_sec', 'N/A')}")
+        print(f"  Latency p50:         {srv.get('latency_p50_ms', 'N/A')}ms")
+        print(f"  Latency p95:         {srv.get('latency_p95_ms', 'N/A')}ms")
+        print(f"  Latency p99:         {srv.get('latency_p99_ms', 'N/A')}ms")
+        dist = srv.get("batch_size_distribution", {})
+        if dist:
+            print(f"  Batch size dist:     {dict(list(dist.items())[:10])}")
+    else:
+        print("  Inference:           offline (no server)")
+    print(f"  Mode:                {'offline' if report['config']['offline'] else 'online'}")
+    print("=" * 60)
+
+    # Save timestamped report to benchmarks/ history folder
+    bench_dir = Path("benchmarks")
+    bench_dir.mkdir(exist_ok=True)
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    out_name = f"{ts}_{run_cfg.deck}_v{run_cfg.version}.json"
+    out_path = bench_dir / out_name
+    out_path.write_text(json.dumps(report, indent=2))
+    print(f"\n  Saved: {out_path}")
+
+    # Compare against previous best in the folder
+    prev_reports = sorted(
+        [f for f in bench_dir.glob("*.json") if f != out_path],
+        key=lambda f: f.name,
+    )
+    if prev_reports:
+        prev = json.loads(prev_reports[-1].read_text())
+        print(f"\n  vs previous ({prev_reports[-1].name}):")
+        _compare("Games/hour", prev.get("games_per_hour", 0), report["games_per_hour"])
+        _compare("MCTS sims/sec", prev.get("jvm", {}).get("mcts_sims_per_sec_mean", 0),
+                 report["jvm"]["mcts_sims_per_sec_mean"])
+        prev_srv = prev.get("server") or {}
+        cur_srv = report.get("server") or {}
+        if prev_srv and cur_srv:
+            _compare("Inferences/sec", prev_srv.get("inferences_per_sec", 0),
+                     cur_srv.get("inferences_per_sec", 0))
+            _compare("Latency p95 (ms)", prev_srv.get("latency_p95_ms", 0),
+                     cur_srv.get("latency_p95_ms", 0), lower_is_better=True)
+    else:
+        print("\n  (first benchmark — no previous to compare against)")
+
+
+def _compare(label: str, old: float, new: float, lower_is_better: bool = False) -> None:
+    if old == 0:
+        print(f"    {label:25s}  {new:>10}  (no baseline)")
+        return
+    delta_pct = (new - old) / old * 100
+    if lower_is_better:
+        arrow = "▼" if delta_pct < 0 else "▲" if delta_pct > 0 else "="
+        color = "better" if delta_pct < 0 else "worse" if delta_pct > 0 else "same"
+    else:
+        arrow = "▲" if delta_pct > 0 else "▼" if delta_pct < 0 else "="
+        color = "better" if delta_pct > 0 else "worse" if delta_pct < 0 else "same"
+    print(f"    {label:25s}  {old:>10} → {new:>10}  {arrow} {abs(delta_pct):+.1f}% ({color})")
+
+
 # ─── main ────────────────────────────────────────────────────
 
 def main() -> None:
@@ -152,6 +236,11 @@ def main() -> None:
     p_export.add_argument("--deck", required=True)
     p_export.add_argument("--version", type=int, required=True)
     p_export.set_defaults(func=cmd_export)
+
+    p_bench = sub.add_parser("benchmark", help="measure generation throughput")
+    p_bench.add_argument("--run", default="configs/run.baylen-smoke.yml")
+    p_bench.add_argument("--game", default="configs/game.yml")
+    p_bench.set_defaults(func=cmd_benchmark)
 
     args = parser.parse_args()
     args.func(args)

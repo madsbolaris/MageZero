@@ -17,6 +17,7 @@ For each generation:
   9. Record gen completion in the run file
 """
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -293,6 +294,75 @@ def launch_jvm(game_yml_path: str) -> None:
     subprocess.run(cmd, check=True)
 
 
+def launch_jvm_capture(game_yml_path: str) -> str:
+    """Launch JVM and capture its stdout+stderr for metric parsing."""
+    print(f"[jvm] launching with {game_yml_path}")
+    yml = str(Path(game_yml_path).resolve())
+    if sys.platform == "win32":
+        cmd = ["cmd", "/c", "xmage\\mz-xmage.bat", yml]
+    else:
+        cmd = ["sh", "xmage/mz-xmage.sh", yml]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Print stderr to console so errors are visible
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, cmd,
+                                            output=result.stdout, stderr=result.stderr)
+    return result.stdout
+
+
+# ─── JVM output parsing ─────────────────────────────────────
+
+# Patterns from ComputerPlayerMCTS2.applyMCTS and ParallelDataGenerator
+_RE_TOTAL_SIMS = re.compile(
+    r"Total: simulated (\d+) evaluations in ([\d.]+) seconds - Average: ([\d.]+)"
+)
+_RE_GAME_DONE = re.compile(r"Game #(\d+) completed successfully")
+_RE_SUCCESSFUL = re.compile(r"Successful: (\d+)")
+_RE_FAILED = re.compile(r"Failed: (\d+)")
+_RE_WIN_RATE = re.compile(r"Player A win rate: ([\d.]+)% \((\d+)/(\d+)\)")
+_RE_DATA_GEN_START = re.compile(r"STARTING DATA GENERATION")
+
+
+def parse_jvm_metrics(output: str) -> dict:
+    """Parse JVM stdout to extract generation performance metrics."""
+    # Collect all 'Total:' lines — each is the cumulative counter at that point.
+    # The last Total: line per thread shows the final sims/sec for that thread.
+    all_averages = []
+    total_evals = 0
+    total_seconds = 0.0
+    for m in _RE_TOTAL_SIMS.finditer(output):
+        evals = int(m.group(1))
+        secs = float(m.group(2))
+        avg = float(m.group(3))
+        all_averages.append(avg)
+        # Keep the highest cumulative eval count (last per-thread line)
+        if evals > total_evals:
+            total_evals = evals
+            total_seconds = secs
+
+    # Game completion stats
+    games_done = len(_RE_GAME_DONE.findall(output))
+    successful_m = _RE_SUCCESSFUL.search(output)
+    failed_m = _RE_FAILED.search(output)
+    win_rate_m = _RE_WIN_RATE.search(output)
+
+    # Wall time from first STARTING DATA GENERATION to last Successful:
+    starts = [m.start() for m in _RE_DATA_GEN_START.finditer(output)]
+
+    result = {
+        "games_completed": games_done,
+        "games_successful": int(successful_m.group(1)) if successful_m else 0,
+        "games_failed": int(failed_m.group(1)) if failed_m else 0,
+        "win_rate_pct": float(win_rate_m.group(1)) if win_rate_m else None,
+        "total_mcts_evals": total_evals,
+        "mcts_sims_per_sec_final": round(all_averages[-1], 2) if all_averages else 0,
+        "mcts_sims_per_sec_mean": round(sum(all_averages) / len(all_averages), 2) if all_averages else 0,
+    }
+    return result
+
+
 def run_train(deck: str, version: int, epochs: int, use_checkpoint: bool,
               run_dir: Path, gen: int) -> None:
     cmd = [PYTHON, f"{SRC}/train.py",
@@ -379,6 +449,119 @@ def restore_from_archive(deck: str, version: int, files: list[Path]) -> None:
         shutil.move(str(f), str(training / f.name))
 
 
+# ─── server metrics ──────────────────────────────────────────
+
+def fetch_server_metrics(port: int) -> Optional[dict]:
+    """Fetch metrics from a running inference server."""
+    try:
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5)
+        import json as _json
+        return _json.loads(resp.read())
+    except Exception:
+        return None
+
+
+def reset_server_metrics(port: int) -> None:
+    """Reset metrics counters on a running inference server."""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/metrics/reset", method="POST")
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass
+
+
+# ─── benchmark ───────────────────────────────────────────────
+
+def run_benchmark(run: RunConfig, curriculum: CurriculumConfig,
+                  base_game_yml: str = "configs/game.yml") -> dict:
+    """Run a single online generation with metric capture.
+
+    Requires an existing checkpoint for the deck/version so the inference
+    server can be started. Does not modify training state — output goes
+    to a temp directory that is cleaned up afterward.
+
+    Returns a dict with:
+      - jvm: parsed JVM metrics (sims/sec, games, win rate)
+      - server: inference server metrics (throughput, latency, batch distribution)
+      - wall_time_sec: total wall time for the generation
+    """
+    if not has_checkpoint(run.deck, run.version):
+        raise RuntimeError(
+            f"No checkpoint found at models/{run.deck}/ver{run.version}/model.pt.gz. "
+            f"Run at least one training generation first:\n"
+            f"  mz train --run {run.curriculum_path.replace('curriculum', 'run')}\n"
+            f"Or use the smoke config:\n"
+            f"  mz train --run configs/run.baylen-smoke.yml"
+        )
+
+    settings = resolve_gen(curriculum, 0)
+    opp = run.opponents[0]
+    opp_ver = opp.version if opp.version is not None else latest_version(opp.deck)
+    if opp_ver is None:
+        opp_ver = 1
+    opp_offline = (opp.mode == "mcts") and not has_checkpoint(opp.deck, opp_ver)
+
+    # Use temp paths so we don't pollute real training data
+    tmp_dir = Path(".mz_tmp/benchmark")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    primary_path = tmp_dir / "primary.hdf5"
+    opponent_path = tmp_dir / "opponent.hdf5"
+
+    game_yml = build_game_yml(
+        base_game_yml, settings, run, opp,
+        primary_path, opponent_path,
+        primary_offline=False, opp_offline=opp_offline,
+    )
+
+    # Create a temporary run dir for server logs
+    run_dir = Path(".mz_tmp/benchmark_run")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    servers = []
+    servers.append(start_server(run.deck, run.version, PRIMARY_PORT, run_dir))
+    reset_server_metrics(PRIMARY_PORT)
+    if opp.mode == "mcts" and not opp_offline:
+        servers.append(start_server(opp.deck, opp_ver, OPPONENT_PORT, run_dir))
+        reset_server_metrics(OPPONENT_PORT)
+
+    wall_start = time.perf_counter()
+    try:
+        jvm_output = launch_jvm_capture(game_yml)
+    finally:
+        # Fetch server metrics before stopping
+        server_metrics = fetch_server_metrics(PRIMARY_PORT)
+        for s in servers:
+            stop_server(s)
+    wall_end = time.perf_counter()
+
+    jvm_metrics = parse_jvm_metrics(jvm_output)
+    wall_time = round(wall_end - wall_start, 2)
+
+    # Compute games/hour
+    games_per_hour = 0
+    if wall_time > 0 and jvm_metrics["games_successful"] > 0:
+        games_per_hour = round(jvm_metrics["games_successful"] / wall_time * 3600, 1)
+
+    # Clean up temp files
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    report = {
+        "wall_time_sec": wall_time,
+        "games_per_hour": games_per_hour,
+        "jvm": jvm_metrics,
+        "server": server_metrics,
+        "config": {
+            "deck": run.deck,
+            "version": run.version,
+            "opponent": opp.deck,
+            "opponent_mode": opp.mode,
+            "games": run.games_per_gen,
+            "offline": False,
+        },
+    }
+    return report
+
+
 # ─── main pipeline ───────────────────────────────────────────
 
 def run_pipeline(run: RunConfig, curriculum: CurriculumConfig,
@@ -435,14 +618,28 @@ def run_pipeline(run: RunConfig, curriculum: CurriculumConfig,
             servers = []
             if not primary_offline:
                 servers.append(start_server(run.deck, run.version, PRIMARY_PORT, run_dir))
+                reset_server_metrics(PRIMARY_PORT)
             if opp.mode == "mcts" and not opp_offline:
                 servers.append(start_server(opp.deck, opp_ver, OPPONENT_PORT, run_dir))
 
+            gen_wall_start = time.perf_counter()
             try:
                 launch_jvm(game_yml)
             finally:
+                gen_wall_end = time.perf_counter()
+                # Fetch server metrics before stopping
+                srv_metrics = None
+                if not primary_offline:
+                    srv_metrics = fetch_server_metrics(PRIMARY_PORT)
                 for s in servers:
                     stop_server(s)
+
+            gen_wall_sec = round(gen_wall_end - gen_wall_start, 2)
+            print(f"[gen {gen}] data generation: {gen_wall_sec}s wall")
+            if srv_metrics:
+                print(f"[gen {gen}] server: {srv_metrics.get('inferences_per_sec', '?')} inferences/sec, "
+                      f"p50={srv_metrics.get('latency_p50_ms', '?')}ms, "
+                      f"p95={srv_metrics.get('latency_p95_ms', '?')}ms")
 
             primary_sessions.setdefault(opp.deck, []).append(primary_sid)
             opponent_sessions.setdefault(opp.deck, []).append(opponent_sid)

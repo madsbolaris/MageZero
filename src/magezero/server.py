@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from collections import defaultdict
 from queue import Queue, Empty
 
 import torch
@@ -28,6 +29,9 @@ torch.set_num_threads(TORCH_THREADS)
 MAX_BATCH = 32
 MAX_WAIT_MS = 5
 
+# Logging control — set MZ_DEBUG_INFERENCE=1 to see per-request/batch prints.
+DEBUG_INFERENCE = os.getenv("MZ_DEBUG_INFERENCE") == "1"
+
 #module state
 server_model = None
 IGNORE_BM = None
@@ -37,6 +41,66 @@ app = Flask(__name__)
 
 req_counter = 0
 req_counter_lock = threading.Lock()
+
+# ─── metrics ─────────────────────────────────────────────────
+
+class ServerMetrics:
+    """Thread-safe throughput and latency counters for the inference server."""
+    __slots__ = ("_lock", "total_requests", "total_batches", "total_inferences",
+                 "batch_size_counts", "latency_samples", "_start_time")
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.total_requests = 0
+        self.total_batches = 0
+        self.total_inferences = 0  # total bag rows (>= requests when multi-bag)
+        self.batch_size_counts: dict[int, int] = defaultdict(int)
+        self.latency_samples: list[float] = []  # ms, capped at 10k
+        self._start_time = time.perf_counter()
+
+    def record_batch(self, batch_size: int, total_bags: int):
+        with self._lock:
+            self.total_batches += 1
+            self.total_requests += batch_size
+            self.total_inferences += total_bags
+            self.batch_size_counts[batch_size] += 1
+
+    def record_latency(self, ms: float):
+        with self._lock:
+            if len(self.latency_samples) < 100_000:
+                self.latency_samples.append(ms)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            elapsed = time.perf_counter() - self._start_time
+            samples = sorted(self.latency_samples)
+            n = len(samples)
+            return {
+                "elapsed_sec": round(elapsed, 2),
+                "total_requests": self.total_requests,
+                "total_batches": self.total_batches,
+                "total_inferences": self.total_inferences,
+                "requests_per_sec": round(self.total_requests / elapsed, 2) if elapsed > 0 else 0,
+                "inferences_per_sec": round(self.total_inferences / elapsed, 2) if elapsed > 0 else 0,
+                "batches_per_sec": round(self.total_batches / elapsed, 2) if elapsed > 0 else 0,
+                "batch_size_distribution": dict(sorted(self.batch_size_counts.items())),
+                "latency_p50_ms": round(samples[n // 2], 2) if n else 0,
+                "latency_p95_ms": round(samples[int(n * 0.95)], 2) if n else 0,
+                "latency_p99_ms": round(samples[int(n * 0.99)], 2) if n else 0,
+                "latency_samples": n,
+            }
+
+    def reset(self):
+        with self._lock:
+            self.total_requests = 0
+            self.total_batches = 0
+            self.total_inferences = 0
+            self.batch_size_counts.clear()
+            self.latency_samples.clear()
+            self._start_time = time.perf_counter()
+
+
+metrics = ServerMetrics()
 
 def init(deck: str, version: int, port: int):
     global server_model, IGNORE_BM, VALID_RANGE
@@ -112,14 +176,13 @@ def worker_loop():
         p0 = Q.get()
         batch = [p0]
 
-        # Collect more requests up to MAX_BATCH or MAX_WAIT_MS
+        # Collect more requests up to MAX_BATCH within MAX_WAIT_MS.
+        # Fixed: use `and` not `or` to respect batch ceiling (C5).
         deadline = time.perf_counter() + (MAX_WAIT_MS / 1000.0)
-        while len(batch) < MAX_BATCH or not Q.empty():
+        while len(batch) < MAX_BATCH:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
-                remaining = 0
-                if Q.empty():
-                    break
+                break
             try:
                 batch.append(Q.get(timeout=remaining))
             except Empty:
@@ -182,7 +245,9 @@ def worker_loop():
             p.t_done = time.perf_counter()
             p.evt.set()
 
-        print(f"[BATCH] size={len(batch)}, total_bag_size={row}")
+        metrics.record_batch(len(batch), row)
+        if DEBUG_INFERENCE:
+            print(f"[BATCH] size={len(batch)}, total_bag_size={row}")
 
 
 threading.Thread(target=worker_loop, daemon=True).start()
@@ -200,13 +265,16 @@ def evaluate():
     offsets = data.get("offsets", [])
     pending = Pending(req_counter, indices, offsets)
 
-    print(f"[REQ {pending.req_id}] indices={pending.pre_count}, kept={pending.post_count}, bag_size={pending.num_bags}")
+    if DEBUG_INFERENCE:
+        print(f"[REQ {pending.req_id}] indices={pending.pre_count}, kept={pending.post_count}, bag_size={pending.num_bags}")
 
     Q.put(pending)
     pending.evt.wait()
 
     total_ms = (pending.t_done - pending.t_recv) * 1000.0
-    print(f"[REQ {pending.req_id}] done: {total_ms:.1f}ms")
+    metrics.record_latency(total_ms)
+    if DEBUG_INFERENCE:
+        print(f"[REQ {pending.req_id}] done: {total_ms:.1f}ms")
 
     return Response(msgpack.packb(pending.out, use_bin_type=True), mimetype="application/x-msgpack")
 
@@ -214,6 +282,19 @@ def evaluate():
 @app.get("/healthz")
 def healthz():
     return "ok", 200
+
+
+@app.get("/metrics")
+def get_metrics():
+    """Return server throughput and latency metrics as JSON."""
+    return metrics.snapshot()
+
+
+@app.post("/metrics/reset")
+def reset_metrics():
+    """Reset all metrics counters (useful for benchmark isolation)."""
+    metrics.reset()
+    return {"status": "reset"}
 
 
 if __name__ == "__main__":
