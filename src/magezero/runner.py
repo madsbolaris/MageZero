@@ -650,10 +650,19 @@ def run_pipeline(run: RunConfig, curriculum: CurriculumConfig,
         settings = resolve_gen(curriculum, gen)
         bootstrap = not has_checkpoint(run.deck, run.version)
 
-        primary_sessions: dict[str, list[int]] = {}
-        opponent_sessions: dict[str, list[int]] = {}
+        # Load any already-completed opponents for this gen (resume support)
+        run_data = json.loads((run_dir / "run.json").read_text())
+        gen_progress = run_data.get("gen_progress", {}).get(str(gen), {})
+        primary_sessions: dict[str, list[int]] = gen_progress.get("primary_sessions", {})
+        opponent_sessions: dict[str, list[int]] = gen_progress.get("opponent_sessions", {})
+        completed_opponents = set(gen_progress.get("completed_opponents", []))
 
         for opp in run.opponents:
+            # Skip opponents already completed in a previous attempt
+            if opp.deck in completed_opponents:
+                print(f"\n[gen {gen}] vs {opp.deck} — already completed, skipping")
+                continue
+
             print(f"\n[gen {gen}] vs {opp.deck} ({opp.mode})")
 
             opp_ver = opp.version if opp.version is not None else latest_version(opp.deck)
@@ -719,6 +728,17 @@ def run_pipeline(run: RunConfig, curriculum: CurriculumConfig,
             primary_sessions.setdefault(opp.deck, []).append(primary_sid)
             opponent_sessions.setdefault(opp.deck, []).append(opponent_sid)
 
+            # Save per-opponent progress so resume skips completed opponents
+            completed_opponents.add(opp.deck)
+            run_data = json.loads((run_dir / "run.json").read_text())
+            gp = run_data.setdefault("gen_progress", {})
+            gp[str(gen)] = {
+                "primary_sessions": primary_sessions,
+                "opponent_sessions": opponent_sessions,
+                "completed_opponents": list(completed_opponents),
+            }
+            (run_dir / "run.json").write_text(json.dumps(run_data, indent=2))
+
         # ── analyze new data ──
         if run.training.analyze_dataset:
             update_run(run_dir, stage="analyze")
@@ -751,6 +771,12 @@ def run_pipeline(run: RunConfig, curriculum: CurriculumConfig,
             restore_from_archive(run.deck, run.version, archived)
 
         record_gen(run_dir, gen, settings, primary_sessions, opponent_sessions)
+
+        # Clean up gen_progress now that this gen is fully recorded
+        run_data = json.loads((run_dir / "run.json").read_text())
+        if "gen_progress" in run_data:
+            run_data["gen_progress"].pop(str(gen), None)
+            (run_dir / "run.json").write_text(json.dumps(run_data, indent=2))
 
     update_run(run_dir, completed_at=datetime.now().isoformat(), stage="done")
     print(f"\n✓ Run complete: {run_dir.name}")
