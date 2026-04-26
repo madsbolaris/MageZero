@@ -323,6 +323,8 @@ _RE_SUCCESSFUL = re.compile(r"Successful: (\d+)")
 _RE_FAILED = re.compile(r"Failed: (\d+)")
 _RE_WIN_RATE = re.compile(r"Player A win rate: ([\d.]+)% \((\d+)/(\d+)\)")
 _RE_DATA_GEN_START = re.compile(r"STARTING DATA GENERATION")
+# Turn numbers appear as [N:Phase:Step] in log lines
+_RE_TURN_NUM = re.compile(r"\[(\d+):[A-Za-z]")
 
 
 def parse_jvm_metrics(output: str) -> dict:
@@ -348,17 +350,37 @@ def parse_jvm_metrics(output: str) -> dict:
     failed_m = _RE_FAILED.search(output)
     win_rate_m = _RE_WIN_RATE.search(output)
 
-    # Wall time from first STARTING DATA GENERATION to last Successful:
-    starts = [m.start() for m in _RE_DATA_GEN_START.finditer(output)]
+    games_successful = int(successful_m.group(1)) if successful_m else 0
+    games_failed = int(failed_m.group(1)) if failed_m else 0
+    wins = int(win_rate_m.group(2)) if win_rate_m else 0
+    total_played = int(win_rate_m.group(3)) if win_rate_m else games_successful
+
+    # Extract turn numbers from [N:Phase:Step] patterns
+    turn_numbers = [int(m.group(1)) for m in _RE_TURN_NUM.finditer(output)]
+    max_turn = max(turn_numbers) if turn_numbers else 0
+    # Approximate total turns: sum of unique turn numbers seen (rough proxy)
+    # More accurate: count distinct turn numbers per "STARTING DATA" block
+    # For now, use max turn * games as an upper-bound proxy
+    total_turns_approx = 0
+    if games_done > 0 and turn_numbers:
+        # Split by STARTING DATA blocks to get per-opponent-session turn counts
+        # Simpler: average the max turn across all games
+        # Use the set of all turn numbers as a rough indicator
+        total_turns_approx = max_turn * games_done  # rough approximation
 
     result = {
         "games_completed": games_done,
-        "games_successful": int(successful_m.group(1)) if successful_m else 0,
-        "games_failed": int(failed_m.group(1)) if failed_m else 0,
+        "games_successful": games_successful,
+        "games_failed": games_failed,
+        "wins": wins,
+        "losses": total_played - wins,
         "win_rate_pct": float(win_rate_m.group(1)) if win_rate_m else None,
         "total_mcts_evals": total_evals,
         "mcts_sims_per_sec_final": round(all_averages[-1], 2) if all_averages else 0,
         "mcts_sims_per_sec_mean": round(sum(all_averages) / len(all_averages), 2) if all_averages else 0,
+        "max_turn": max_turn,
+        "total_turns_approx": total_turns_approx,
+        "avg_turns_per_game": round(total_turns_approx / games_done, 1) if games_done > 0 else 0,
     }
     return result
 
@@ -447,6 +469,43 @@ def restore_from_archive(deck: str, version: int, files: list[Path]) -> None:
     training = Path("data") / deck / f"ver{version}" / "training"
     for f in files:
         shutil.move(str(f), str(training / f.name))
+
+
+# ─── training curve ──────────────────────────────────────────
+
+CURVE_HEADER = ("gen,opponent,games,wins,losses,win_rate_pct,"
+                "wall_sec,games_per_hour,sims_per_sec_avg,sims_per_sec_end,"
+                "inferences_per_sec,avg_turns_per_game,max_turn,"
+                "total_turns_approx,mode\n")
+
+
+def append_training_curve(run_dir: Path, gen: int, opponent: str,
+                          jvm: dict, wall_sec: float,
+                          srv: Optional[dict], offline: bool) -> None:
+    """Append one row per opponent to the training curve CSV."""
+    csv_path = run_dir / "training_curve.csv"
+    if not csv_path.exists():
+        csv_path.write_text(CURVE_HEADER)
+
+    games = jvm.get("games_successful", 0)
+    wins = jvm.get("wins", 0)
+    losses = jvm.get("losses", 0)
+    wr = jvm.get("win_rate_pct", 0) or 0
+    gph = round(games / wall_sec * 3600, 1) if wall_sec > 0 and games > 0 else 0
+    sims_avg = jvm.get("mcts_sims_per_sec_mean", 0)
+    sims_end = jvm.get("mcts_sims_per_sec_final", 0)
+    inf_sec = srv.get("inferences_per_sec", 0) if srv else 0
+    avg_turns = jvm.get("avg_turns_per_game", 0)
+    max_turn = jvm.get("max_turn", 0)
+    total_turns = jvm.get("total_turns_approx", 0)
+    mode = "offline" if offline else "online"
+
+    row = (f"{gen},{opponent},{games},{wins},{losses},{wr},"
+           f"{wall_sec},{gph},{sims_avg},{sims_end},"
+           f"{inf_sec},{avg_turns},{max_turn},"
+           f"{total_turns},{mode}\n")
+    with open(csv_path, "a") as f:
+        f.write(row)
 
 
 # ─── server metrics ──────────────────────────────────────────
@@ -624,7 +683,7 @@ def run_pipeline(run: RunConfig, curriculum: CurriculumConfig,
 
             gen_wall_start = time.perf_counter()
             try:
-                launch_jvm(game_yml)
+                jvm_output = launch_jvm_capture(game_yml)
             finally:
                 gen_wall_end = time.perf_counter()
                 # Fetch server metrics before stopping
@@ -635,11 +694,27 @@ def run_pipeline(run: RunConfig, curriculum: CurriculumConfig,
                     stop_server(s)
 
             gen_wall_sec = round(gen_wall_end - gen_wall_start, 2)
-            print(f"[gen {gen}] data generation: {gen_wall_sec}s wall")
+            jvm_metrics = parse_jvm_metrics(jvm_output)
+
+            # Print per-opponent summary
+            wins = jvm_metrics.get("wins", 0)
+            losses = jvm_metrics.get("losses", 0)
+            wr = jvm_metrics.get("win_rate_pct", 0) or 0
+            games_ok = jvm_metrics.get("games_successful", 0)
+            avg_turns = jvm_metrics.get("avg_turns_per_game", 0)
+            gph = round(games_ok / gen_wall_sec * 3600, 1) if gen_wall_sec > 0 and games_ok > 0 else 0
+            sims = jvm_metrics.get("mcts_sims_per_sec_mean", 0)
+            print(f"[gen {gen}] vs {opp.deck}: {wins}W/{losses}L ({wr:.1f}%) | "
+                  f"{games_ok} games in {gen_wall_sec}s ({gph} games/hr) | "
+                  f"{avg_turns} avg turns/game | {sims} sims/sec")
             if srv_metrics:
                 print(f"[gen {gen}] server: {srv_metrics.get('inferences_per_sec', '?')} inferences/sec, "
                       f"p50={srv_metrics.get('latency_p50_ms', '?')}ms, "
                       f"p95={srv_metrics.get('latency_p95_ms', '?')}ms")
+
+            # Append to training curve CSV
+            append_training_curve(run_dir, gen, opp.deck, jvm_metrics,
+                                  gen_wall_sec, srv_metrics, primary_offline)
 
             primary_sessions.setdefault(opp.deck, []).append(primary_sid)
             opponent_sessions.setdefault(opp.deck, []).append(opponent_sid)

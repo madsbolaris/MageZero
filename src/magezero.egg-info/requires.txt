@@ -1,0 +1,10 @@
+numpy>=1.24
+scipy>=1.10
+torch>=2.1
+h5py>=3.8
+pyroaring>=0.3.6
+flask>=2.3
+msgpack>=1.0.5
+waitress>=2.1
+matplotlib>=3.7
+pyyaml>=6.0
