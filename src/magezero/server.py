@@ -4,6 +4,7 @@ import time
 from collections import defaultdict
 from queue import Queue, Empty
 
+import numpy as np
 import torch
 import waitress
 from pyroaring import BitMap
@@ -219,24 +220,28 @@ def worker_loop():
         bin2 = bin2.cpu()
         val = val.cpu()
 
-        # Split results back to individual requests
+        # Split results back to individual requests.
+        # Policy/value tensors are sent as raw float32 binary blobs instead of
+        # Python float lists — avoids .tolist() Python-object overhead and
+        # msgpack float64 encoding. Java client reads little-endian float32.
+        # See madsbolaris/MageZero#2 (P2).
         row = 0
         for p, num_bags in zip(batch, bag_counts):
             if num_bags == 1:
                 p.out = {
-                    "policy_player": pA[row].tolist(),
-                    "policy_opponent": pB[row].tolist(),
-                    "policy_target": tgt[row].tolist(),
-                    "policy_binary": bin2[row].tolist(),
+                    "policy_player": pA[row].numpy().tobytes(),
+                    "policy_opponent": pB[row].numpy().tobytes(),
+                    "policy_target": tgt[row].numpy().tobytes(),
+                    "policy_binary": bin2[row].numpy().tobytes(),
                     "value": float(val[row].item()),
                 }
             else:
                 p.out = [
                     {
-                        "policy_player": pA[row + i].tolist(),
-                        "policy_opponent": pB[row + i].tolist(),
-                        "policy_target": tgt[row + i].tolist(),
-                        "policy_binary": bin2[row + i].tolist(),
+                        "policy_player": pA[row + i].numpy().tobytes(),
+                        "policy_opponent": pB[row + i].numpy().tobytes(),
+                        "policy_target": tgt[row + i].numpy().tobytes(),
+                        "policy_binary": bin2[row + i].numpy().tobytes(),
                         "value": float(val[row + i].item()),
                     }
                     for i in range(num_bags)
