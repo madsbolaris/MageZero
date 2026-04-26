@@ -250,9 +250,6 @@ def worker_loop():
             print(f"[BATCH] size={len(batch)}, total_bag_size={row}")
 
 
-threading.Thread(target=worker_loop, daemon=True).start()
-
-
 @app.post("/evaluate")
 def evaluate():
     global req_counter

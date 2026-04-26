@@ -32,8 +32,12 @@ def train(
 
 
     #ignore handling
-    print("Generating ignore list from dataset to use for model")
-    ignore_list = create_redundancy_ignore_list(ds_raw)
+    if make_ignore_list:
+        print("Generating ignore list from dataset to use for model")
+        ignore_list = create_redundancy_ignore_list(ds_raw)
+    else:
+        print("Skipping ignore list generation (make_ignore_list=False)")
+        ignore_list = BitMap()
 
     # model and data loaders
     model = Net(GLOBAL_MAX, ACTIONS_MAX).to(DEVICE)
@@ -45,18 +49,17 @@ def train(
             #checkpoint = torch.load(checkpoint_path, map_location="cuda")
             checkpoint = load_model(checkpoint_path)
             model.load_state_dict(checkpoint['model_state_dict'])
-            with open(f"models/{deck}/ver{version}/ignore.roar", "rb") as f:
-                ignore_list2 = BitMap.deserialize(f.read())
-                ignore_list.intersection_update(ignore_list2)
-                #ignore_list = ignore_list2
-            print(f"intersected with previous ignore list: {len(ignore_list2)} for final ignore list: {len(ignore_list)} leaving {GLOBAL_MAX-len(ignore_list)} features")
+            if make_ignore_list:
+                with open(f"models/{deck}/ver{version}/ignore.roar", "rb") as f:
+                    ignore_list2 = BitMap.deserialize(f.read())
+                    ignore_list.intersection_update(ignore_list2)
+                    #ignore_list = ignore_list2
+                print(f"intersected with previous ignore list: {len(ignore_list2)} for final ignore list: {len(ignore_list)} leaving {GLOBAL_MAX-len(ignore_list)} features")
             print(f"Successfully loaded checkpoint from {checkpoint_path}")
         except FileNotFoundError:
             print(f"INFO: Checkpoint file not found at {checkpoint_path}. Starting from scratch.")
         except Exception as e:
             print(f"ERROR: Could not load checkpoint. {e}. Starting from scratch.")
-
-    if not make_ignore_list: ignore_list = []
     print("Saving ignore list to ignore.roar")
 
     ignore = BitMap(ignore_list)  # iterable of ints
