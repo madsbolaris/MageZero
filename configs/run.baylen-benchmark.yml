@@ -1,0 +1,24 @@
+# run.baylen-benchmark.yml — benchmark config for measuring online throughput.
+# Uses 15 games (vs 5 in smoke) to smooth out game-length variance.
+# Primary metric: MCTS sims/sec (engine speed, independent of game length).
+# Secondary metrics: games/hour, inferences/sec, batch distribution, latency.
+# Expected wall time: ~15-20 min on M1 Mac.
+deck: BaylenBunnies
+version: 99
+start_from_version: null
+
+generations: 1
+games_per_gen: 15
+replay_buffer_gens: 1
+
+opponents:
+  - deck: Standard-MonoG
+    mode: minimax
+
+training:
+  analyze_dataset: false
+  generate_plots: false
+  eval_previous_model: false
+
+log_level: ACTIONS
+curriculum: configs/curriculum.yml

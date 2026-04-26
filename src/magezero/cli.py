@@ -139,13 +139,13 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
     print("\n" + "=" * 60)
     print("  BENCHMARK REPORT")
     print("=" * 60)
-    print(f"  Wall time:           {report['wall_time_sec']}s")
+    print(f"  MCTS sims/sec (avg): {report['jvm']['mcts_sims_per_sec_mean']}  ← primary")
+    print(f"  MCTS sims/sec (end): {report['jvm']['mcts_sims_per_sec_final']}")
     print(f"  Games/hour:          {report['games_per_hour']}")
+    print(f"  Wall time:           {report['wall_time_sec']}s")
     print(f"  Games completed:     {report['jvm']['games_successful']} "
           f"(failed: {report['jvm']['games_failed']})")
     print(f"  Win rate:            {report['jvm']['win_rate_pct']}%")
-    print(f"  MCTS sims/sec (avg): {report['jvm']['mcts_sims_per_sec_mean']}")
-    print(f"  MCTS sims/sec (end): {report['jvm']['mcts_sims_per_sec_final']}")
     if report.get("server"):
         srv = report["server"]
         print(f"  Inferences/sec:      {srv.get('inferences_per_sec', 'N/A')}")
@@ -179,9 +179,9 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
     if prev_reports:
         prev = json.loads(prev_reports[-1].read_text())
         print(f"\n  vs previous ({prev_reports[-1].name}):")
-        _compare("Games/hour", prev.get("games_per_hour", 0), report["games_per_hour"])
         _compare("MCTS sims/sec", prev.get("jvm", {}).get("mcts_sims_per_sec_mean", 0),
                  report["jvm"]["mcts_sims_per_sec_mean"])
+        _compare("Games/hour", prev.get("games_per_hour", 0), report["games_per_hour"])
         prev_srv = prev.get("server") or {}
         cur_srv = report.get("server") or {}
         if prev_srv and cur_srv:
@@ -238,7 +238,7 @@ def main() -> None:
     p_export.set_defaults(func=cmd_export)
 
     p_bench = sub.add_parser("benchmark", help="measure generation throughput")
-    p_bench.add_argument("--run", default="configs/run.baylen-smoke.yml")
+    p_bench.add_argument("--run", default="configs/run.baylen-benchmark.yml")
     p_bench.add_argument("--game", default="configs/game.yml")
     p_bench.set_defaults(func=cmd_benchmark)
 
