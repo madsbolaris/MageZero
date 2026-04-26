@@ -691,8 +691,14 @@ def run_pipeline(run: RunConfig, curriculum: CurriculumConfig,
                 servers.append(start_server(opp.deck, opp_ver, OPPONENT_PORT, run_dir))
 
             gen_wall_start = time.perf_counter()
+            jvm_output = ""
             try:
                 jvm_output = launch_jvm_capture(game_yml)
+            except subprocess.CalledProcessError as e:
+                # XMage can crash with IllegalStateException on certain card
+                # interactions. Log it but continue — partial data is still usable.
+                print(f"[gen {gen}] WARNING: JVM crashed vs {opp.deck} (exit {e.returncode})")
+                jvm_output = e.output or ""
             finally:
                 gen_wall_end = time.perf_counter()
                 # Fetch server metrics before stopping
